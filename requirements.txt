@@ -1,0 +1,24 @@
+# Smart File Organizer 依赖包
+
+# AI 工作流框架
+langgraph>=0.0.40
+
+# 数据验证
+pydantic>=2.5.0
+
+# 文档处理
+pypdf>=3.17.0
+python-docx>=1.1.0
+
+# 配置文件解析
+pyyaml>=6.0.1
+
+# 日志工具（更优雅的日志输出）
+loguru>=0.7.2
+
+# 文件系统监听（用于实时监控文件变化）
+watchdog>=4.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+

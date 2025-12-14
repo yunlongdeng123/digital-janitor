@@ -1,0 +1,50 @@
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 环境变量
+.env
+.env.local
+
+# 日志文件
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 测试和缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 项目特定：保留目录结构，但忽略内容
+# inbox 目录
+inbox/*
+!inbox/.gitkeep
+
+# archive 目录（包含子目录）
+archive/*
+!archive/.gitkeep
+
+# quarantine 隔离区
+quarantine/*
+!quarantine/.gitkeep
+
+# logs 日志目录
+logs/*
+!logs/.gitkeep
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
