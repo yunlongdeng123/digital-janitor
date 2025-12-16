@@ -34,32 +34,42 @@ naming_template:
   image:
     pattern: "图片_{description}_{date}.{ext}"
     example: "图片_产品截图_20231215.png"
+    
+  # 演示文稿命名规则：演示_主题_日期.ext
+  presentation:
+    pattern: "演示_{topic}_{date}.{ext}"
+    example: "演示_产品发布会_20231215.pptx"
 
 # 文件归档路由规则（实现文件名与存储路径分离）
 routing:
   # 发票归档路径：按年/月组织
   invoice:
-    target_dir: "archive/财务/{year}/{month}"
+    target_dir: "财务/{year}/{month}"
     description: "财务类文档按年月归档"
     
   # 合同归档路径：按年组织
   contract:
-    target_dir: "archive/合同/{year}"
+    target_dir: "合同/{year}"
     description: "合同文档按年归档"
     
   # 论文归档路径：按主题/年份组织
   paper:
-    target_dir: "archive/论文/{topic}/{year}"
+    target_dir: "论文/{topic}/{year}"
     description: "学术论文按主题和年份归档"
     
   # 图片归档路径：按日期组织
   image:
-    target_dir: "archive/图片/{year}/{month}"
+    target_dir: "图片/{year}/{month}"
     description: "图片按年月归档"
+    
+  # 演示文稿归档路径：按年组织
+  presentation:
+    target_dir: "演示文稿/{year}"
+    description: "演示文稿按年归档"
     
   # 默认归档路径
   default:
-    target_dir: "archive/其他/{year}"
+    target_dir: "其他/{year}"
     description: "未分类文件归档到其他目录"
 
 # 安全性配置
@@ -84,6 +94,8 @@ safety:
     - ".doc"
     - ".xlsx"
     - ".xls"
+    - ".ppt"
+    - ".pptx"
     - ".txt"
     - ".png"
     - ".jpg"
