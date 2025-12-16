@@ -51,7 +51,7 @@ from langgraph.graph import StateGraph, END
 # 项目内部模块
 from core.schemas import RenamePlan
 from core.validator import validate_plan
-from utils.file_ops import discover_files, extract_text_preview, get_file_size_mb, safe_move_file
+from utils.file_ops import discover_files, extract_text_preview_enhanced, get_file_size_mb, safe_move_file
 from core.llm_processor import analyze_file
 
 # Memory 系统
@@ -102,6 +102,7 @@ class JanitorState(TypedDict, total=False):
 
     # 中间产物
     preview: str              # 预览文本
+    extraction_metadata: Dict[str, Any]  # 🆕 OCR V2: 文本提取元数据 (method, confidence, quality_score, needs_review, processing_time_ms)
     analysis: Dict[str, Any]  # 存储 LLM 分析的原始结果
     plan: RenamePlan          # 核心对象：重命名计划
 
@@ -123,10 +124,40 @@ class JanitorState(TypedDict, total=False):
 # --- 2. 定义节点 (Nodes) ---
 
 def node_extract_preview(state: JanitorState) -> JanitorState:
-    """节点1: 提取文本预览"""
+    """节点1: 提取文本预览（OCR V2 增强版）"""
     fp = state["file_path"]  # 获取文件路径
-    # print(f"  [Graph] Extracting preview for {fp.name}...")  # 打印日志
-    state["preview"] = extract_text_preview(fp, limit=state.get("max_preview", 1000))  # 提取文本预览
+    max_preview = state.get("max_preview", 1000)
+    
+    # 🆕 OCR V2: 使用增强版文本提取
+    result = extract_text_preview_enhanced(fp, limit=max_preview)
+    
+    # 提取文本内容
+    state["preview"] = result.get("text", "")
+    
+    # 🆕 OCR V2: 保存元数据（排除 text 字段）
+    state["extraction_metadata"] = {
+        "method": result.get("method", "unknown"),
+        "confidence": result.get("confidence", 0.0),
+        "quality_score": result.get("quality_score", 0),
+        "needs_review": result.get("needs_review", False),
+        "processing_time_ms": result.get("processing_time_ms", 0),
+        "page_count": result.get("page_count", 0),
+        "char_count": result.get("char_count", 0),
+        "error": result.get("error"),
+    }
+    
+    # 🆕 打印简短日志
+    method = state["extraction_metadata"]["method"]
+    quality = state["extraction_metadata"]["quality_score"]
+    time_ms = state["extraction_metadata"]["processing_time_ms"]
+    cached = "_cached" in method
+    
+    print(f"   📄 文本提取: {method} | 质量={quality} | 耗时={time_ms}ms" + (" 💾" if cached else ""))
+    
+    # 如果质量较低，打印警告
+    if state["extraction_metadata"]["needs_review"]:
+        print(f"   ⚠️  OCR 质量较低 ({quality}分)，可能需要人工审查")
+    
     return state
 
 
@@ -236,7 +267,7 @@ def node_validate(state: JanitorState) -> JanitorState:
 
 
 def node_human_review(state: JanitorState) -> JanitorState:
-    """节点4.5: 人类在环确认（HITL）- Step 7 非阻塞式审批"""
+    """节点4.5: 人类在环确认（HITL）- Step 7 非阻塞式审批 + OCR V2 质量熔断"""
     fp = state["file_path"]
     plan = state["plan"]
 
@@ -252,8 +283,18 @@ def node_human_review(state: JanitorState) -> JanitorState:
     print(f"   → 目标目录：{plan.dest_dir}")
     print(f"   → 类别/置信度：{plan.category} / {float(plan.confidence):.2f}")
     
+    # 🆕 OCR V2: 检查 OCR 质量熔断
+    extraction_metadata = state.get("extraction_metadata", {})
+    ocr_needs_review = extraction_metadata.get("needs_review", False)
+    ocr_quality_score = extraction_metadata.get("quality_score", 100)
+    
     # 🆕 Step 7: 非阻塞式审批机制
     auto_approve = state.get("auto_approve", False)
+    
+    # 🆕 OCR V2 质量熔断：如果 OCR 质量低，强制转为人工审批
+    if ocr_needs_review:
+        print(f"   ⚠️  OCR 质量低 ({ocr_quality_score}分)，强制转为人工审批")
+        auto_approve = False  # 强制关闭自动批准
     
     if auto_approve:
         # 自动批准模式：立即批准
@@ -284,6 +325,10 @@ def node_human_review(state: JanitorState) -> JanitorState:
             "preview": state.get("preview", "")[:500],  # 保存前500字符预览
             "created_at": datetime.now().isoformat(),
             "status": "pending",
+            # 🆕 OCR V2: 记录质量问题标记
+            "ocr_quality_issue": ocr_needs_review,
+            "ocr_quality_score": ocr_quality_score,
+            "extraction_method": extraction_metadata.get("method", "unknown"),
         }
         
         # 保存到 JSON 文件
@@ -292,6 +337,10 @@ def node_human_review(state: JanitorState) -> JanitorState:
         
         print(f"   ⏳ 计划已生成，等待 UI 审批")
         print(f"      文件：{pending_filename}")
+        
+        # 🆕 OCR V2: 如果是因为 OCR 质量问题导致的人工审批，额外提示
+        if ocr_needs_review:
+            print(f"      ⚠️  原因：OCR 质量低 ({ocr_quality_score}分)")
         
         # 设置为 pending 状态（不执行，也不拒绝）
         state["approved"] = False
@@ -351,6 +400,9 @@ def node_apply(state: JanitorState) -> JanitorState:
             print(f"   ❌ 移动失败：{fp.name}")
             print(f"      原因: {move_result.get('error', '未知错误')}\n")
 
+    # 🆕 OCR V2: 获取提取元数据
+    extraction_metadata = state.get("extraction_metadata", {})
+    
     # 构建日志记录
     state["record"] = {
         "timestamp": datetime.now().isoformat(),
@@ -365,6 +417,8 @@ def node_apply(state: JanitorState) -> JanitorState:
         "execution_status": execution_status,
         "moved_to": moved_to,
         "move_result": state.get("move_result"),
+        # 🆕 OCR V2: 记录文本提取元数据
+        "extraction_metadata": extraction_metadata,
     }
     return state
 
@@ -374,6 +428,11 @@ def node_skip(state: JanitorState) -> JanitorState:
     fp = state["file_path"]
     plan = state["plan"]
     decision = state.get("decision", "skipped")
+
+    # 🆕 OCR V2: 获取提取元数据
+    extraction_metadata = state.get("extraction_metadata", {})
+    ocr_needs_review = extraction_metadata.get("needs_review", False)
+    ocr_quality_score = extraction_metadata.get("quality_score", 100)
 
     # 根据决策类型给出不同的提示
     if decision == "auto_reject_invalid":
@@ -385,6 +444,9 @@ def node_skip(state: JanitorState) -> JanitorState:
     elif decision == "pending":
         emoji = "⏳"
         reason = "等待审批"
+        # 🆕 OCR V2: 如果因 OCR 质量问题导致的 pending，在原因中注明
+        if ocr_needs_review:
+            reason = f"等待审批 (OCR质量低: {ocr_quality_score}分)"
     else:
         emoji = "⏭️"
         reason = "跳过"
@@ -402,6 +464,8 @@ def node_skip(state: JanitorState) -> JanitorState:
         "approved": False,
         "decision": decision,
         "pending_file": state.get("pending_file"),  # 🆕 Step 7: 记录待审批文件路径
+        # 🆕 OCR V2: 记录文本提取元数据
+        "extraction_metadata": extraction_metadata,
     }
     return state
 
