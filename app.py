@@ -308,7 +308,7 @@ def render_sidebar():
         st.header("🗂️ 页面")
         page = st.radio(
             "选择页面",
-            ["📋 待审批队列", "📜 审批历史", "🧠 学习到的偏好"],
+            ["📋 待审批队列", "📈 统计看板", "📜 审批历史", "🧠 学习到的偏好"],
             label_visibility="collapsed"
         )
         st.session_state['current_page'] = page
@@ -766,6 +766,204 @@ def render_preferences_page():
         st.error(f"加载偏好失败: {e}")
 
 
+def render_dashboard_page():
+    """渲染统计看板页面"""
+    st.title("📈 统计看板")
+    st.markdown("系统运行数据总览")
+    st.markdown("---")
+    
+    try:
+        with MemoryDatabase() as db:
+            repo = ApprovalRepository(db)
+            
+            # 获取统计数据
+            stats = repo.get_statistics(days=30)
+            all_approvals = repo.get_recent_approvals(limit=1000)
+            
+            # === 1. 关键指标 (KPI) ===
+            st.subheader("📊 关键指标")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                total = stats['total_approvals']
+                st.metric(
+                    "总处理文件数",
+                    f"{total:,}",
+                    help="系统启动以来处理的文件总数"
+                )
+            
+            with col2:
+                # 计算自动化率
+                approved_count = stats['action_breakdown'].get('approved', 0)
+                automation_rate = (approved_count / total * 100) if total > 0 else 0
+                st.metric(
+                    "自动化率",
+                    f"{automation_rate:.1f}%",
+                    help="直接批准（未修改）的文件占比"
+                )
+            
+            with col3:
+                # 估算节省时间（假设每个文件手动处理需要2分钟）
+                time_saved_minutes = total * 2
+                if time_saved_minutes >= 60:
+                    time_saved_display = f"{time_saved_minutes // 60:.1f}小时"
+                else:
+                    time_saved_display = f"{time_saved_minutes}分钟"
+                
+                st.metric(
+                    "节省时间估算",
+                    time_saved_display,
+                    help="假设每个文件手动整理需要2分钟"
+                )
+            
+            with col4:
+                recent = stats['recent_count']
+                st.metric(
+                    "最近30天",
+                    f"{recent:,}",
+                    help="最近30天处理的文件数"
+                )
+            
+            st.markdown("---")
+            
+            # === 2. 图表 1: 文件类型分布 ===
+            st.subheader("📁 文件类型分布")
+            
+            if all_approvals:
+                # 统计文件类型
+                df_all = pd.DataFrame(all_approvals)
+                
+                if 'doc_type' in df_all.columns:
+                    type_counts = df_all['doc_type'].value_counts()
+                    
+                    # 创建两列布局
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        # 使用 bar_chart
+                        st.bar_chart(type_counts)
+                    
+                    with col2:
+                        # 显示详细数据
+                        st.dataframe(
+                            pd.DataFrame({
+                                '类型': type_counts.index,
+                                '数量': type_counts.values,
+                                '占比': [f"{v/type_counts.sum()*100:.1f}%" for v in type_counts.values]
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                else:
+                    st.info("暂无文件类型数据")
+            else:
+                st.info("暂无数据")
+            
+            st.markdown("---")
+            
+            # === 3. 图表 2: 最近7天处理量趋势 ===
+            st.subheader("📈 最近7天处理量趋势")
+            
+            if all_approvals:
+                df_all = pd.DataFrame(all_approvals)
+                
+                if 'created_at' in df_all.columns:
+                    # 转换时间格式
+                    df_all['date'] = pd.to_datetime(df_all['created_at']).dt.date
+                    
+                    # 获取最近7天的数据
+                    last_7_days = pd.date_range(
+                        end=datetime.now().date(),
+                        periods=7
+                    ).date
+                    
+                    # 统计每天的处理量
+                    daily_counts = df_all.groupby('date').size()
+                    
+                    # 创建完整的7天数据（包括0的天数）
+                    trend_data = pd.Series(
+                        [daily_counts.get(day, 0) for day in last_7_days],
+                        index=last_7_days
+                    )
+                    
+                    # 创建两列布局
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.line_chart(trend_data)
+                    
+                    with col2:
+                        st.dataframe(
+                            pd.DataFrame({
+                                '日期': [str(d) for d in trend_data.index],
+                                '处理量': trend_data.values
+                            }),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                else:
+                    st.info("暂无时间数据")
+            else:
+                st.info("暂无数据")
+            
+            st.markdown("---")
+            
+            # === 4. 图表 3: Top 5 供应商 ===
+            st.subheader("🏢 Top 5 最常出现的供应商")
+            
+            top_vendors = stats.get('top_vendors', [])
+            
+            if top_vendors:
+                # 转为 DataFrame
+                vendor_df = pd.DataFrame(top_vendors, columns=['供应商', '文件数'])
+                vendor_df = vendor_df.head(5)  # 只取前5个
+                
+                # 创建两列布局
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    # 使用 bar_chart
+                    chart_data = vendor_df.set_index('供应商')
+                    st.bar_chart(chart_data)
+                
+                with col2:
+                    # 显示表格
+                    st.dataframe(
+                        vendor_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+            else:
+                st.info("暂无供应商数据")
+            
+            st.markdown("---")
+            
+            # === 5. 额外信息 ===
+            st.subheader("ℹ️ 系统信息")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info(f"📊 **操作分布**")
+                for action, count in stats['action_breakdown'].items():
+                    percentage = (count / total * 100) if total > 0 else 0
+                    st.text(f"• {action}: {count} ({percentage:.1f}%)")
+            
+            with col2:
+                avg_time = stats['avg_processing_time_ms']
+                st.info(f"⏱️ **平均处理时间**")
+                st.text(f"• {avg_time:.0f} ms/文件")
+                
+                if total > 0:
+                    total_time_seconds = total * avg_time / 1000
+                    st.text(f"• 累计: {total_time_seconds:.1f} 秒")
+            
+    except Exception as e:
+        st.error(f"加载统计数据失败: {e}")
+        st.exception(e)  # 显示详细错误信息
+
+
 # ==================== 主程序 ====================
 
 def main():
@@ -776,7 +974,9 @@ def main():
     # 🆕 根据选择的页面渲染不同内容
     page = st.session_state.get('current_page', '📋 待审批队列')
     
-    if page == '📜 审批历史':
+    if page == '📈 统计看板':
+        render_dashboard_page()
+    elif page == '📜 审批历史':
         render_history_page()
     elif page == '🧠 学习到的偏好':
         render_preferences_page()

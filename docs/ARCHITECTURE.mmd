@@ -1,0 +1,164 @@
+%% Digital Janitor - 系统架构图
+%% 使用 Mermaid 语法绘制完整数据流
+
+graph TB
+    %% ========== 输入层 ==========
+    User[👤 用户]
+    Inbox[📥 Inbox 目录<br/>待处理文件]
+    
+    %% ========== 监听层 ==========
+    Watchdog[👀 File Monitor<br/>Watchdog]
+    
+    %% ========== 核心工作流 ==========
+    Router[🎯 Router<br/>LangGraph 状态机]
+    
+    %% 节点：文本提取
+    ExtractNode[📄 Extract Preview Node]
+    Cache[(💾 OCR Cache<br/>Redis/File)]
+    DirectExtract[📝 Direct Extract<br/>pypdf]
+    OCREngine[🔍 OCR Engine]
+    RapidOCR[⚡ RapidOCR<br/>本地识别]
+    VisionLLM[👁️ Vision LLM<br/>多模态]
+    
+    %% 节点：LLM 分析
+    LLMNode[🧠 LLM Analyze Node]
+    OpenAI[🤖 OpenAI API<br/>GPT-4]
+    
+    %% 节点：构建计划
+    BuildPlanNode[📋 Build Plan Node]
+    Memory[(🧠 Memory System<br/>SQLite)]
+    PreferenceQuery{🔍 Query Preference<br/>Memory Hit?}
+    
+    %% 节点：路由决策
+    RouteDecision{🔀 Route Decision}
+    MemoryRoute[🧠 Memory Route<br/>学习到的偏好]
+    DateRoute[📅 Date Partition<br/>财务文档]
+    SemanticRoute[🏷️ Semantic Route<br/>Vendor/Category]
+    
+    %% 节点：校验
+    ValidateNode[✅ Validate Node<br/>安全检查]
+    
+    %% 节点：人工审批
+    HITLNode[🤝 Human Review Node]
+    PendingDir[📁 Pending 目录<br/>JSON 文件]
+    
+    %% ========== UI 层 ==========
+    WebUI[🌐 Streamlit Web UI]
+    Dashboard[📈 统计看板]
+    ApprovalQueue[📋 待审批队列]
+    HistoryPage[📜 审批历史]
+    PreferencePage[🧠 偏好管理]
+    
+    %% 节点：用户决策
+    UserDecision{👤 User Decision}
+    
+    %% 节点：执行
+    ApplyNode[✅ Apply Node<br/>执行移动]
+    SkipNode[⏭️ Skip Node<br/>跳过]
+    
+    %% ========== 存储层 ==========
+    Archive[📦 Archive 目录<br/>归档文件]
+    Quarantine[🗑️ Quarantine 目录<br/>隔离区]
+    LogFile[📝 Logs<br/>JSONL 日志]
+    
+    %% ========== 数据流 ==========
+    
+    %% 1. 文件监听流程
+    User -->|拖入文件| Inbox
+    Inbox -->|自动检测| Watchdog
+    Watchdog -->|触发处理| Router
+    Inbox -->|手动执行| Router
+    
+    %% 2. Router 分发
+    Router --> ExtractNode
+    
+    %% 3. 文本提取流程
+    ExtractNode -->|检查缓存| Cache
+    Cache -->|缓存命中| ExtractNode
+    Cache -->|缓存未命中| DirectExtract
+    DirectExtract -->|质量判断| ExtractNode
+    ExtractNode -->|需要 OCR| OCREngine
+    OCREngine -->|重要文档| VisionLLM
+    OCREngine -->|普通文档| RapidOCR
+    VisionLLM -->|结果| ExtractNode
+    RapidOCR -->|结果| ExtractNode
+    ExtractNode -->|写入缓存| Cache
+    
+    %% 4. LLM 分析
+    ExtractNode -->|文本预览| LLMNode
+    LLMNode -->|调用 API| OpenAI
+    OpenAI -->|结构化输出| LLMNode
+    
+    %% 5. 构建计划 + Memory 查询
+    LLMNode -->|分析结果| BuildPlanNode
+    BuildPlanNode -->|查询偏好| PreferenceQuery
+    PreferenceQuery -->|读取| Memory
+    
+    %% 6. 路由决策（三级优先级）
+    PreferenceQuery -->|优先级1: 命中| MemoryRoute
+    PreferenceQuery -->|未命中| RouteDecision
+    RouteDecision -->|优先级2: 财务类| DateRoute
+    RouteDecision -->|优先级3: 其他| SemanticRoute
+    MemoryRoute --> BuildPlanNode
+    DateRoute --> BuildPlanNode
+    SemanticRoute --> BuildPlanNode
+    
+    %% 7. 校验
+    BuildPlanNode -->|重命名计划| ValidateNode
+    ValidateNode -->|合法| HITLNode
+    ValidateNode -->|不合法| SkipNode
+    
+    %% 8. 人工审批（非阻塞）
+    HITLNode -->|生成 JSON| PendingDir
+    PendingDir -->|轮询读取| WebUI
+    
+    %% 9. Web UI 展示
+    WebUI --> Dashboard
+    WebUI --> ApprovalQueue
+    WebUI --> HistoryPage
+    WebUI --> PreferencePage
+    ApprovalQueue -->|展示详情| User
+    
+    %% 10. 用户决策
+    User -->|批准/修改/拒绝| UserDecision
+    UserDecision -->|批准| ApplyNode
+    UserDecision -->|拒绝| SkipNode
+    
+    %% 11. 保存决策到 Memory
+    ApplyNode -->|记录日志| Memory
+    SkipNode -->|记录日志| Memory
+    Memory -->|学习偏好| PreferenceQuery
+    
+    %% 12. 执行文件移动
+    ApplyNode -->|安全移动| Archive
+    SkipNode -->|移动到隔离区| Quarantine
+    
+    %% 13. 日志记录
+    ApplyNode -->|写入日志| LogFile
+    SkipNode -->|写入日志| LogFile
+    
+    %% 14. 统计数据流
+    Memory -->|查询统计| Dashboard
+    LogFile -->|读取日志| HistoryPage
+    
+    %% 15. 偏好管理
+    Memory -->|查询/删除| PreferencePage
+    
+    %% ========== 样式 ==========
+    classDef inputStyle fill:#e1f5ff,stroke:#01579b,stroke-width:2px
+    classDef processStyle fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    classDef storageStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef uiStyle fill:#c8e6c9,stroke:#1b5e20,stroke-width:2px
+    classDef decisionStyle fill:#ffccbc,stroke:#bf360c,stroke-width:2px
+    
+    class User,Inbox inputStyle
+    class Watchdog,Router,ExtractNode,LLMNode,BuildPlanNode,ValidateNode,HITLNode,ApplyNode,SkipNode processStyle
+    class Cache,Memory,Archive,Quarantine,LogFile,PendingDir storageStyle
+    class WebUI,Dashboard,ApprovalQueue,HistoryPage,PreferencePage uiStyle
+    class PreferenceQuery,RouteDecision,UserDecision decisionStyle
+    
+    %% ========== 注释 ==========
+    note1[💡 关键特性:<br/>1. OCR 缓存加速<br/>2. 三级路由策略<br/>3. 增量学习算法<br/>4. 非阻塞 HITL]
+    
+    style note1 fill:#fff3e0,stroke:#e65100,stroke-width:2px,stroke-dasharray: 5 5
+
