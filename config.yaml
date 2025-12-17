@@ -40,37 +40,29 @@ naming_template:
     pattern: "演示_{topic}_{date}.{ext}"
     example: "演示_产品发布会_20231215.pptx"
 
-# 文件归档路由规则（实现文件名与存储路径分离）
+# 文件归档路由规则 (PR#2: 三级路由策略)
+# 
+# 路由优先级:
+#   1. Memory 偏好 (最高) - 从用户历史操作中学习的偏好
+#   2. 日期分层规则 - 财务类文档按 Category/YYYY/MM 归档
+#   3. 语义化归档 - 其他文档按 Category/Vendor 归档
+#
 routing:
-  # 发票归档路径：按年/月组织
-  invoice:
-    target_dir: "财务/{year}/{month}"
-    description: "财务类文档按年月归档"
-    
-  # 合同归档路径：按年组织
-  contract:
-    target_dir: "合同/{year}"
-    description: "合同文档按年归档"
-    
-  # 论文归档路径：按主题/年份组织
-  paper:
-    target_dir: "论文/{topic}/{year}"
-    description: "学术论文按主题和年份归档"
-    
-  # 图片归档路径：按日期组织
-  image:
-    target_dir: "图片/{year}/{month}"
-    description: "图片按年月归档"
-    
-  # 演示文稿归档路径：按年组织
-  presentation:
-    target_dir: "演示文稿/{year}"
-    description: "演示文稿按年归档"
-    
-  # 默认归档路径
-  default:
-    target_dir: "其他/{year}"
-    description: "未分类文件归档到其他目录"
+  # 强制使用日期分层 (Category/YYYY/MM) 的文档类型
+  # 这些类型的文件会按年月自动归档，便于财务审计
+  date_partition_types: 
+    - "invoice"        # 发票
+    - "receipt"        # 票据/收据
+    - "bank_statement" # 银行账单
+  
+  # 非日期类型的默认归档模板 (Python f-string 风格)
+  # 可用变量: category, vendor, title, year, month
+  # 例如: 合同/腾讯科技, 论文/张三
+  default_structure: "{category}/{vendor}"
+  
+  # 兜底目录 (当无法提取 vendor 时使用)
+  # 例如: 合同/General, 论文/General
+  fallback_structure: "{category}/General"
 
 # 安全性配置
 safety:

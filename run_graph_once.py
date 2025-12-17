@@ -58,34 +58,118 @@ from core.llm_processor import analyze_file
 from core.memory import MemoryDatabase, ApprovalRepository, PreferenceRepository
 import hashlib
 
-# --- 辅助函数：直接包含在这里，避免依赖 run_once_llm.py ---
-def build_target_dir(category: str, date_str: Optional[str], config: dict) -> str:
-    """根据类别和日期构建目标目录"""
-    # 类别映射
-    cat_cn = {
-        "invoice": "发票", "contract": "合同", "paper": "论文",
-        "image": "图片", "presentation": "演示文稿", "default": "其他",
-    }.get(category, "其他")
-    
-    # 路由规则
-    routing = config.get("routing", {})
-    if category in routing:
-        template = routing[category].get("target_dir", f"{cat_cn}/{{year}}/{{month}}")
-    else:
-        template = f"{cat_cn}/{{year}}"
+# --- 辅助函数：PR#2 三级路由策略 ---
 
-    # 清理路径前缀
-    template = template.replace("archive/", "").replace("archive\\", "").lstrip("/\\")
+# 类别中文映射表
+CAT_CN_MAP = {
+    "invoice": "发票",
+    "receipt": "票据",
+    "bank_statement": "银行账单",
+    "contract": "合同",
+    "paper": "论文",
+    "image": "图片",
+    "presentation": "演示文稿",
+    "default": "其他",
+}
+
+# 无效 Vendor 值列表（大小写不敏感）
+INVALID_VENDOR_VALUES = {"", "unknown", "n/a", "none", "无", "未知", "null"}
+
+
+def sanitize_path_component(value: str) -> str:
+    """
+    清洗路径组件，移除非法字符
     
-    # 日期解析
+    Args:
+        value: 原始值（如 vendor 名称）
+    
+    Returns:
+        安全的路径组件字符串
+    """
+    if not value:
+        return ""
+    # 替换 Windows/Unix 路径非法字符
+    illegal_chars = r'[/\\:*?"<>|]'
+    sanitized = re.sub(illegal_chars, '_', value)
+    # 移除首尾空格和点（Windows 不允许文件夹名以点结尾）
+    sanitized = sanitized.strip().rstrip('.')
+    return sanitized
+
+
+def is_valid_vendor(vendor: Optional[str]) -> bool:
+    """
+    检查 vendor 是否有效
+    
+    Args:
+        vendor: 供应商/对方名称
+    
+    Returns:
+        True 如果 vendor 有效，False 否则
+    """
+    if vendor is None:
+        return False
+    vendor_lower = vendor.strip().lower()
+    return vendor_lower not in INVALID_VENDOR_VALUES
+
+
+def build_date_partition_path(category: str, date_str: Optional[str]) -> str:
+    """
+    构建日期分层路径 (Category/YYYY/MM)
+    
+    用于财务类文档（发票、票据、银行账单）的归档。
+    
+    Args:
+        category: 文档类别
+        date_str: 提取的日期字符串 (格式: YYYY-MM 或 YYYY-MM-DD)
+    
+    Returns:
+        目标目录路径，如 "发票/2024/12"
+    """
+    # 获取中文类别名
+    cat_cn = CAT_CN_MAP.get(category, CAT_CN_MAP["default"])
+    
+    # 解析日期
     year, month = "未知年份", "未知月份"
     if date_str:
         m = re.match(r"(?P<y>20\d{2})[-./]?(?P<m>\d{2})?", date_str)
         if m:
             year = m.group("y")
             month = m.group("m") if m.group("m") else "01"
+    
+    return f"{cat_cn}/{year}/{month}"
 
-    return template.replace("{year}", year).replace("{month}", month)
+
+def build_semantic_path(
+    category: str, 
+    vendor: Optional[str],
+    default_tpl: str = "{category}/{vendor}",
+    fallback_tpl: str = "{category}/General"
+) -> str:
+    """
+    构建语义化路径 (Category/Vendor)
+    
+    用于非财务类文档（合同、论文等）的归档。
+    
+    Args:
+        category: 文档类别
+        vendor: 供应商/对方/作者名称
+        default_tpl: 默认模板 (当 vendor 有效时使用)
+        fallback_tpl: 兜底模板 (当 vendor 无效时使用)
+    
+    Returns:
+        目标目录路径，如 "合同/腾讯科技" 或 "合同/General"
+    """
+    # 获取中文类别名
+    cat_cn = CAT_CN_MAP.get(category, CAT_CN_MAP["default"])
+    
+    # 检查 vendor 有效性
+    if is_valid_vendor(vendor):
+        # 使用默认模板
+        safe_vendor = sanitize_path_component(vendor)
+        return default_tpl.format(category=cat_cn, vendor=safe_vendor)
+    else:
+        # 使用兜底模板
+        return fallback_tpl.format(category=cat_cn)
 
 
 # --- 1. 定义状态 (State) ---
@@ -115,6 +199,10 @@ class JanitorState(TypedDict, total=False):
 
     # 🆕 Step 7: 待审批相关
     pending_file: str         # 待审批 JSON 文件路径
+
+    # 🆕 PR#2: 路由策略相关
+    routing_source: str       # 路由来源: memory / date_partition / semantic
+    used_learned_preference: bool  # 是否使用了学习到的偏好
 
     # 输出/日志
     record: Dict[str, Any]    # 记录
@@ -185,7 +273,14 @@ def node_llm_analyze(state: JanitorState) -> JanitorState:
 
 
 def node_build_plan(state: JanitorState) -> JanitorState:
-    """节点3: 构建重命名计划 (RenamePlan)"""
+    """
+    节点3: 构建重命名计划 (RenamePlan)
+    
+    PR#2: 实现三级路由优先级
+      1. Memory 偏好 (最高) - 从用户历史操作中学习
+      2. 日期分层规则 - 财务类文档按 Category/YYYY/MM
+      3. 语义化归档 - 其他文档按 Category/Vendor
+    """
     fp = state["file_path"]
     cfg = state["cfg"]
 
@@ -202,18 +297,30 @@ def node_build_plan(state: JanitorState) -> JanitorState:
             validation_msg=state["error"],
         )
         state["plan"] = plan
+        state["routing_source"] = "error"
         return state
 
     # 正常构建逻辑
     a = state["analysis"]
+    category = a["category"]
+    vendor = a.get("vendor_or_party")
+    date_str = a.get("extracted_date")
     
-    # 🆕 尝试应用学习到的文件夹偏好
+    # 读取路由配置
+    routing_cfg = cfg.get("routing", {})
+    date_partition_types = routing_cfg.get("date_partition_types", ["invoice", "receipt", "bank_statement"])
+    default_structure = routing_cfg.get("default_structure", "{category}/{vendor}")
+    fallback_structure = routing_cfg.get("fallback_structure", "{category}/General")
+    
+    # === 三级路由优先级 ===
+    
+    # 1️⃣ 优先级 1: Memory 偏好 (最高)
     learned_folder = None
     if "preference_repo" in state and state["preference_repo"]:
         try:
             context = {
-                'vendor': a.get("vendor_or_party"),
-                'doc_type': a.get("category")
+                'vendor': vendor,
+                'doc_type': category
             }
             learned_folder = state["preference_repo"].get_preference(
                 'vendor_folder',
@@ -223,14 +330,33 @@ def node_build_plan(state: JanitorState) -> JanitorState:
         except Exception:
             pass  # 失败不影响主流程
     
-    # 使用学习到的文件夹或默认规则
     if learned_folder:
+        # Memory 偏好命中
         target_dir_rel = learned_folder
-        # 添加标记表示这是学习到的偏好
+        state["routing_source"] = "memory"
         state["used_learned_preference"] = True
+        print(f"   🧠 路由: Memory 偏好命中 -> {target_dir_rel}")
     else:
-        target_dir_rel = build_target_dir(a["category"], a.get("extracted_date"), cfg)
         state["used_learned_preference"] = False
+        
+        # 2️⃣ 优先级 2: 日期分层规则 (财务类文档)
+        if category in date_partition_types:
+            target_dir_rel = build_date_partition_path(category, date_str)
+            state["routing_source"] = "date_partition"
+            print(f"   📅 路由: 日期分层 ({category}) -> {target_dir_rel}")
+        else:
+            # 3️⃣ 优先级 3: 语义化归档 (非财务类文档)
+            target_dir_rel = build_semantic_path(
+                category=category,
+                vendor=vendor,
+                default_tpl=default_structure,
+                fallback_tpl=fallback_structure
+            )
+            state["routing_source"] = "semantic"
+            if is_valid_vendor(vendor):
+                print(f"   🏷️  路由: 语义化 ({category}/{vendor}) -> {target_dir_rel}")
+            else:
+                print(f"   📁 路由: 语义化兜底 ({category}/General) -> {target_dir_rel}")
 
     # 扩展名处理
     ext = fp.suffix
@@ -243,14 +369,14 @@ def node_build_plan(state: JanitorState) -> JanitorState:
 
     # 创建 Pydantic 对象
     plan = RenamePlan(
-        category=a["category"],
+        category=category,
         new_name=new_name,
         dest_dir=target_dir_rel,
         confidence=a["confidence"],
         extracted={
-            "date": a.get("extracted_date"),
+            "date": date_str,
             "amount": a.get("extracted_amount"),
-            "vendor_or_party": a.get("vendor_or_party"),
+            "vendor_or_party": vendor,
             "title": a.get("title"),
         },
         rationale=a.get("rationale", ""),
@@ -419,6 +545,9 @@ def node_apply(state: JanitorState) -> JanitorState:
         "move_result": state.get("move_result"),
         # 🆕 OCR V2: 记录文本提取元数据
         "extraction_metadata": extraction_metadata,
+        # 🆕 PR#2: 记录路由来源
+        "routing_source": state.get("routing_source", "unknown"),
+        "used_learned_preference": state.get("used_learned_preference", False),
     }
     return state
 
@@ -466,6 +595,9 @@ def node_skip(state: JanitorState) -> JanitorState:
         "pending_file": state.get("pending_file"),  # 🆕 Step 7: 记录待审批文件路径
         # 🆕 OCR V2: 记录文本提取元数据
         "extraction_metadata": extraction_metadata,
+        # 🆕 PR#2: 记录路由来源
+        "routing_source": state.get("routing_source", "unknown"),
+        "used_learned_preference": state.get("used_learned_preference", False),
     }
     return state
 
